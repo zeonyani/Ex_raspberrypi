@@ -81,10 +81,13 @@ int listDir(char *arg)
 		t = localtime(&statBuf.st_mtime); // 최근 수정된 시간 출력
 
 		// 출력을 위한 서식화 : tm 구조체는 뒤에서 설명
-		sprintf(mtime, "%04-%02d-%02d %02d:%02d:%02d", t->tm_year + 1900, t->tm_mon + 1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+		sprintf(mtime, "%04d-%02d-%02d %02d:%02d:%02d", t->tm_year + 1900, t->tm_mon + 1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
 
 		printf("%s %2d %s %s %9ld %s %s\n", permission, statBuf.st_nlink, username->pw_name, groupname->gr_name, statBuf.st_size, mtime, dirt->d_name);
 	}
+
+	for(i=0;i<count;i++) // 다른 디렉터리에 대한 재귀 호출
+		if(listDir(dirName[i])==-1) break;
 
 	printf("\n");
 	closedir(pdir); // 열었던 디렉터리의 스트림을 닫기
