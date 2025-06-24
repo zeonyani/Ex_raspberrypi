@@ -12,14 +12,13 @@
 #include <errno.h> // errno 변수
 #include <sys/resource.h> // getrlimit, setrlimt (파일 디스크립터 제한 설정)
 #include <sys/wait.h> // waitpid()
-#include <fcntl.h> // open(), O_RDWR
+#include <fcntl.h> // open(), O_RDWR, fcntl(), O_NONBLOCK
 
 #define TCP_PORT 5100 // 서버가 사용할 포트 번호
 #define BUFSIZE 1024 // 버퍼 크기
 #define MAX_CLIENTS 10 // 최대 클라이언트 수(조절 가능)
 
 // 전역 변수 및 시그널 핸들러 선언
-// 향후 자식 PID 목록 관리, 파이프 FD 관리 등을 위해 필요
 typedef struct {
     pid_t pid;
     int parent_read_pipe_fd; // 부모가 자식으로부터 읽을 파이프 FD (자식이 쓸 FD)
@@ -27,13 +26,13 @@ typedef struct {
     char client_ip[INET_ADDRSTRLEN]; // 클라이언트 IP 주소
     int client_port; // 클라이언트 포트 번호 (추가 정보)
     char nickname[32]; // 클라이언트 닉네임
-    int client_socket_fd; // 클라이언트와 통신하는 소켓 FD (자식 프로세스에서만 유효)
     int is_active; // 해당 슬롯이 활성상태인지 여부(1: 활성 0: 비활성)
 }client_info_t;
 
 // 활성 클라이언트(자식 프로세스) 정보를 저장할 배열
 client_info_t clients[MAX_CLIENTS];
 
+// 클라이언트 정보 배열 초기화 함수
 void init_clients_array(){
     for(int i = 0; i < MAX_CLIENTS; i++){
         clients[i].pid = 0; // 0은 사용하지 않는 PID
@@ -42,7 +41,6 @@ void init_clients_array(){
         memset(clients[i].client_ip, 0, sizeof(clients[i].client_ip));
         clients[i].client_port = 0;
         memset(clients[i].nickname, 0, sizeof(clients[i].nickname));
-        clients[i].client_socket_fd = -1;
         clients[i].is_active = 0; // 비활성 상태로 초기화
      }
      syslog(LOG_INFO, "Clients array initialized.");
@@ -51,8 +49,6 @@ void init_clients_array(){
 volatile sig_atomic_t server_running = 1; // 서버 종료를 위한 플래그
 volatile sig_atomic_t sigusr1_received = 0; // SIGUSR1 수신 플래그 (부모->자식 메시지 알림)
 volatile sig_atomic_t sigusr2_received = 0; // SIGUSR2 수신 플래그 (자식->부모 메시지 알림)
-volatile pid_t signaling_child_pid = 0; // SIGURS2를 보낸 자식 PID (누가 보냈는지 식별)
-
 
 // SIGCHILD 시그널 핸들러 : 좀비 프로세스 방지
 void handle_sigchld(int sig){
@@ -65,19 +61,28 @@ void handle_sigchld(int sig){
 
         // clients 배열에서 해당 PID 정보 제거
         for(int i = 0; i < MAX_CLIENTS; i++){
-            if(clients[i].pid == pid) {
+            if(clients[i].is_active && clients[i].pid == pid) {
                 syslog(LOG_INFO, "Removing client %d (PID: %d) from active list.", i, pid);
-                close(clients[i].parent_read_pipe_fd); // 부모가 읽는 파이프 끝 닫기
-                close(clients[i].child_write_pipe_fd); // 부모가 쓰는 파이프 끝 닫기
+                if(clients[i].parent_read_pipe_fd != -1){
+                    close(clients[i].parent_read_pipe_fd);
+                    syslog(LOG_INFO, "Closed parent_read_pipe_fd %d for PID %d.", clients[i].parent_read_pipe_fd, pid);
+                }
+                if(clients[i].child_write_pipe_fd != -1){
+                    close(clients[i].child_write_pipe_fd);
+                    syslog(LOG_INFO, "Close child_write_pipe_fd %d for PID %d", clients[i].child_write_pipe_fd);
+                }
                 clients[i].is_active = 0; // 슬롯 비활성화
                 clients[i].pid = 0; // PID 초기화
+                memset(clients[i].client_ip, 0, sizeof(clients[i].client_ip));
+                clients[i].client_port = 0;
+                memset(clients[i].nickname, 0, sizeof(clients[i].nickname));
                 break;
             }
         }
     }
 }
 
-// SIGIN (ctrl+c) 및 SIGCTERM 시그널 핸들러 : 서버 우아한 종료
+// SIGINT (ctrl+c) 및 SIGCTERM 시그널 핸들러 : 서버 우아한 종료
 void handle_sigint_term(int sig){
     syslog(LOG_INFO, "SIGINT/SIGTERM received. Initiation graceful shutdown.");
     server_running = 0; // 메인 루프 종료 플래그 설정
@@ -111,7 +116,6 @@ void handle_client_communication(int csock, int to_parent_pipe_wfd, int from_par
 
     syslog(LOG_INFO, "Child %d communication handler started.", getpid());
 
-    // 임시 코드(클라이언트로부터 받은 메시지 기록 및 알림, 부모로 부터 받음 메시지 처리
     while(1){
         // (1) 클라이언트로부터 메시지 읽기
         nbytes = read(csock, buffer, BUFSIZE-1);
@@ -124,7 +128,6 @@ void handle_client_communication(int csock, int to_parent_pipe_wfd, int from_par
             }
 
             // 클라이언트로부터 받은 메시지를 부모에게 파이프로 전송하고 SIGUSR2 시그널 전송
-            // q가 아닌 다른 메시지일 경우에만 하단의 블록이 실행
             if(write(to_parent_pipe_wfd, buffer, nbytes) == -1) {
                 if(errno == EPIPE){ // 파이프가 닫혔을 경우 (부모가 종료됐을 수 있음)
                     syslog(LOG_WARNING, "Child %d: Broken pipe to parent, parent might have terminated.", getpid());
@@ -158,7 +161,10 @@ void handle_client_communication(int csock, int to_parent_pipe_wfd, int from_par
                     syslog(LOG_ERR, "Child %d write to client error : %m", getpid());
                 }
             } else if(nbytes == 0){ // 파이프 닫힘(부모가 종료 or 파이프 닫음)
-                syslog(LOG_INFO, "Chld %d read from parent pipe error: %m", getpid());
+                syslog(LOG_INFO, "Child %d read from parent pipe error: %m", getpid());
+                break;
+            } else if(nbytes == -1 && errno != EWOULDBLOCK) { // 논블로킹 읽기 오류 처리
+                syslog(LOG_ERR, "Child %d read from parent pipe error: %m", getpid());
                 break;
             }
         }
@@ -176,7 +182,7 @@ int main(int argc, char **argv)
     socklen_t clen = sizeof(cliaddr); // 클라이언트 주소 구조체 크기
     pid_t pid; // fork()를 위한 PID
 
-    // 0. TCP 서버 소켓 생성 및 바인딩
+    // 0. TCP 서버 소켓 생성 및 바인딩 (데몬화 이전 수행)
     // 0-1. 소켓 생성 (IPv4, TCP 스트림 소켓)
     ssock = socket(AF_INET, SOCK_STREAM, 0);
     if(ssock == -1){
@@ -244,7 +250,7 @@ int main(int argc, char **argv)
     }
     for(int i = 0; i < rl.rlim_cur; i++){
         // ssock은 닫지 않도록 함
-        if(i == ssock) { // 닫지 않음
+        if(i == ssock) { // ssock은 닫지 않음
             continue;
         }
         close(i);
@@ -332,9 +338,54 @@ int main(int argc, char **argv)
     }
     syslog(LOG_INFO, "Chat server listening on port %d...", TCP_PORT);
 
-    // 4. 무한 루프: 클라이언트 연결 수락 및 자식 프로세스 생성
-    while(server_running) { // server_running 플래그가 0이 되면 종료
-        csock = accept(ssock, (struct sockaddr *)&cliaddr, &clen); // 클라이언트 연결 수락
+    // 4. 무한 루프: 클라이언트 연결 수락 및 자식 프로세스 생성, IPC 메시지 처리
+    while(server_running) { // 메인 루프 시작
+        usleep(10000); // CPU 과사용 방지 및 시그널 처리 기회 제공
+        
+        // (A) SIGUSR2 시그널 처리 및 메시지 브로드 캐스팅(자식->부모 메시지)
+        if(sigusr2_received){
+            sigusr2_received = 0; // 플래그 초기화
+            syslog(LOG_INFO, "Parent received SIGUSR2. CHecking child pipes for messages.");
+
+            char broadcast_buffer[BUFSIZE];
+            int msg_len = 0;
+            pid_t sender_pid = 0;
+
+            for(int i = 0; i < MAX_CLIENTS; i++){
+                if(clients[i].is_active && clients[i].parent_read_pipe_fd != -1){
+                    int n_read = read(clients[i].parent_read_pipe_fd, broadcast_buffer, BUFSIZE-1);
+                    if(n_read > 0) {
+                        broadcast_buffer[n_read] = '\0';
+                        syslog(LOG_INFO, "Parent read '%s' from child %d (PID %d).",
+                                broadcast_buffer, i, clients[i].pid);
+                        msg_len = n_read;
+                        sender_pid = clients[i].pid;
+                        break;
+                    } else if(n_read == -1 && errno != EWOULDBLOCK) {
+                        syslog(LOG_ERR, "Parent read from child pipe %d (PID %d) error: %m",
+                                clients[i].parent_read_pipe_fd, clients[i].pid);
+                    }
+                }
+            }
+
+            if(msg_len > 0){
+                syslog(LOG_INFO, "Parent broadcasting message : %s (from PID: %d)", broadcast_buffer, sender_pid);
+                for(int i = 0; i < MAX_CLIENTS; i++) {
+                    if(clients[i].is_active && clients[i].child_write_pipe_fd != -1 && clients[i].pid != sender_pid) {
+                        if(errno == EPIPE) syslog(LOG_WARNING, "Parent: Broken pipe writing to child %d (PID: %d). Client might have disconnected.",
+                                                    i, clients[i].pid);
+                        else if(errno != EWOULDBLOCK){
+                            syslog(LOG_ERR, "Parent write to child pipe %d(PID %d) error: %m",
+                                    clients[i].child_write_pipe_fd, clients[i].pid);
+                        }
+                    }
+                }
+            }
+        } // sigusr2_received의 끝
+
+        // (B) 새로운 클라이언트 연결 수락 및 자식 프로세스 생성
+        csock = accept(ssock, (struct sockaddr *)&cliaddr, &clen);
+
         if(csock == -1){
             // accpet()가 시그널에 의해 중단될 수 있으므로 EINTR 처리
             if(errno == EINTR && server_running) continue; // 서버가 계속 실행중이면 다시 accept 시도
@@ -381,6 +432,12 @@ int main(int argc, char **argv)
         if(pipe(parent_read_pipe_fds) == -1 || pipe(child_write_pipe_fds) == -1){
             syslog(LOG_ERR, "pipe() creation error: %m");
             close(csock);
+
+            // 파이프 생성 실패 시 열려 있는 FD 닫기
+            if(parent_read_pipe_fds[0] != -1) close(parent_read_pipe_fds[0]);
+            if(parent_read_pipe_fds[1] != -1) close(parent_read_pipe_fds[1]);
+            if(child_write_pipe_fds[0] != -1) close(child_write_pipe_fds[0]);
+            if(child_write_pipe_fds[1] != -1) close(child_write_pipe_fds[1]);
             continue;
         }
 
@@ -402,7 +459,8 @@ int main(int argc, char **argv)
             // 따라서 사용하지 않는 파이프 끝 닫아야 한다
             close(parent_read_pipe_fds[0]); // 부모가 읽는 끝은 자식에게 필요
             close(child_write_pipe_fds[1]); // 부모가 쓰는 끝은 자식에게 필요
-            
+            fcntl(parent_read_pipe_fds[1], F_SETFL, O_NONBLOCK); // 자식이 부모에게 스는 파이프(FD: parent_read_pipe_fds[1])
+            fcntl(child_write_pipe_fds[0], F_SETFL, O_NONBLOCK); // 자식이 부모로부터 읽는 파이프(FD: child_write_pipe_fds[0])
             syslog(LOG_INFO, "Child process %d handling new client from %s:%d. Assigned pipe FD R:%d W:%d", getpid(),
                    inet_ntoa(cliaddr.sin_addr), ntohs(cliaddr.sin_port),
                    child_write_pipe_fds[0], parent_read_pipe_fds[1]); // 자식 입장에서의 읽기&쓰기 파이프 FD
@@ -415,12 +473,12 @@ int main(int argc, char **argv)
 
             // 통신 완료 후 자식 프로세스에서 모든 FD 닫기
             close(csock);
-            close(parent_read_pipe_fds[0]);
-            close(child_write_pipe_fds[0]);
+            close(parent_read_pipe_fds[1]); // 자식이 부모에게 쓴느 파이프 끝 닫기
+            close(child_write_pipe_fds[0]); // 자식이 부모로부터 읽는 파이프 끝 닫기
             syslog(LOG_INFO, "Child process %d disconnected from client and exiting", getpid());
             exit(EXIT_SUCCESS); // 자식 프로세스 종료
         } else{ // 부모 프로세스
-            close(csock); // 부모는 클라이언트 직접 사용하지 않음
+            close(csock); // 부모는 클라이언트 직접 사용하지 않으므로 닫음
 
             // 부모 프로세스에서 파이프 FD 정리
             // 부모가 읽는 파이프의 읽기 끝
@@ -439,53 +497,28 @@ int main(int argc, char **argv)
             inet_ntop(AF_INET, &cliaddr.sin_addr, clients[client_idx].client_ip, INET_ADDRSTRLEN);
             clients[client_idx].client_port = ntohs(cliaddr.sin_port);
             clients[client_idx].is_active = 1; // 활성 상태로 설정
+            snprintf(clients[client_idx].nickname, sizeof(clients[client_idx].nickname), "user%d", client_idx); // 닉네임 초기 설정
 
             syslog(LOG_INFO, "Parent process created child %d for client %s:%d at slot %d, Pipes R:%d W:%d",
                     pid, clients[client_idx].client_port, client_idx,
                     clients[client_idx].parent_read_pipe_fd, clients[client_idx].child_write_pipe_fd);
+        } // else문의 끝(부모프로세스 블록)
+    } // while문의 끝
+
+    // 5. 서버 종료 시 정리 작업
+    syslog(LOG_INFO, "Chat SErver Daemin shutting down.");
+    // 모든 활성 자식 프로세스 종료 (SIGTERM)
+    for(int i = 0; i < MAX_CLIENTS; i++){
+        if(clients[i].is_active){
+            syslog(LOG_INFO, "Terminating child process %d (PID: %d).", i, clients[i].pid);
+            kill(clients[i].pid, SIGTERM); // 자식에게 종료 시그널 전송
+            // 자식 프로세스의 파이프 FD 닫기
+            if(clients[i].parent_read_pipe_fd != -1) close(clients[i].parent_read_pipe_fd);
+            if(clients[i].child_write_pipe_fd != -1) close(clients[i].child_write_pipe_fd);
         }
+    }
 
-
-        // 새로운 클라이언트 연결 시 fork() 호출하여 자식 프로세스 생성
-        pid = fork();
-        if(pid == -1){ // fork 실패
-            syslog(LOG_ERR, "fork() error: %m");
-            close(csock); // 클라이언트 소켓 닫고 다음 연결 시도
-            continue;
-        } else if(pid == 0){ // 자식 프로세스: 클라이언트와의 통신 담당
-            close(ssock); // 자식은 리스닝 소켓을 사용할 필요가 없으므로 닫음
-            syslog(LOG_INFO, "Child process %d (PID: %d) hadling new client from %s: %d",
-            getpid(), getppid(), inet_ntoa(cliaddr.sin_addr), ntohs(cliaddr.sin_port));
-            char msg[BUFSIZE];
-            int n;
-
-            // 클라이언트로부터 메시지 받고 그대로 다시 보내는 간단한 루프
-            while((n = read(csock, msg, BUFSIZE)) > 0){
-                msg[n] = '\0'; // 널 종료 문자 추가
-                syslog(LOG_INFO, "Client message from %s %d: %s",
-                inet_ntoa(cliaddr.sin_addr), ntohs(cliaddr.sin_port), msg);
-
-                if(strcmp(msg, "q") == 0){ // 클라이언트가 'q'를 보내면 종료
-                    syslog(LOG_INFO, "Client %s: %d requested disconnect.",
-                    inet_ntoa(cliaddr.sin_addr), ntohs(cliaddr.sin_port));
-                    break;
-                }
-
-                if(write(csock, msg, n) <= 0){
-                    syslog(LOG_ERR, "write() to client error: %m");
-                    break;
-                }
-            }
-
-            close(csock); // 클라이언트 소켓 닫음
-            syslog(LOG_INFO, "Child process %d disconnected from client adn exitin.", getpid());
-            exit(EXIT_SUCCESS); // 자식 프로세스 종료
-        } else{ // 부모 프로세스: 자식 프로세스를 생성하고 계속 연결 대기
-            close(csock); // 부모는 클라이언트 소켓을 직접 사용하지 않으므로 닫음
-        }
     close(ssock); // 서버 리스닝 소켓 닫음
     closelog(); // 시스템 로그 닫음
-    syslog(LOG_INFO, "Chat Server Daemon terminated gracefully.");
-    }
-    return 0;
+    return EXIT_SUCCESS;
 }
