@@ -419,7 +419,7 @@ int main(int argc, char **argv)
             close(child_write_pipe_fds[0]);
             syslog(LOG_INFO, "Child process %d disconnected from client and exiting", getpid());
             exit(EXIT_SUCCESS); // 자식 프로세스 종료
-        } else{ // 부모 프로세스
+         else{ // 부모 프로세스
             close(csock); // 부모는 클라이언트 직접 사용하지 않음
 
             // 부모 프로세스에서 파이프 FD 정리
@@ -486,5 +486,6 @@ int main(int argc, char **argv)
     close(ssock); // 서버 리스닝 소켓 닫음
     closelog(); // 시스템 로그 닫음
     syslog(LOG_INFO, "Chat Server Daemon terminated gracefully.");
+    }
     return 0;
 }
