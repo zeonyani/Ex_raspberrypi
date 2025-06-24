@@ -419,7 +419,7 @@ int main(int argc, char **argv)
             close(child_write_pipe_fds[0]);
             syslog(LOG_INFO, "Child process %d disconnected from client and exiting", getpid());
             exit(EXIT_SUCCESS); // 자식 프로세스 종료
-         else{ // 부모 프로세스
+        } else{ // 부모 프로세스
             close(csock); // 부모는 클라이언트 직접 사용하지 않음
 
             // 부모 프로세스에서 파이프 FD 정리
@@ -443,8 +443,8 @@ int main(int argc, char **argv)
             syslog(LOG_INFO, "Parent process created child %d for client %s:%d at slot %d, Pipes R:%d W:%d",
                     pid, clients[client_idx].client_port, client_idx,
                     clients[client_idx].parent_read_pipe_fd, clients[client_idx].child_write_pipe_fd);
-            }
         }
+
 
         // 새로운 클라이언트 연결 시 fork() 호출하여 자식 프로세스 생성
         pid = fork();
