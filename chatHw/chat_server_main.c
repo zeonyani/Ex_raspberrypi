@@ -156,8 +156,8 @@ void handle_client_communication(int csock, int to_parent_pipe_wfd, int from_par
             nbytes = read(from_parent_pipe_rfd, buffer, BUFSIZE - 1);
             if(nbytes > 0){
                 buffer[nbytes] = '\0';
-                syslog(LOG_INFO, "Child %d received from parent via pipe: $s", getpid(), buffer);
-                if(write(csock, buffer, nbytes) == 1) {
+                syslog(LOG_INFO, "Child %d received from parent via pipe: %s", getpid(), buffer);
+                if(write(csock, buffer, nbytes) == -1) {
                     syslog(LOG_ERR, "Child %d write to client error : %m", getpid());
                 }
             } else if(nbytes == 0){ // 파이프 닫힘(부모가 종료 or 파이프 닫음)
@@ -336,6 +336,10 @@ int main(int argc, char **argv)
         close(ssock);
         exit(EXIT_FAILURE);
     }
+
+    // 서버 소켓을 논블로킹 모드로 설정 (새로운 터미널 접속 못하니까 추가)
+    fcntl(ssock, F_SETFL, O_NONBLOCK);
+
     syslog(LOG_INFO, "Chat server listening on port %d...", TCP_PORT);
 
     // 4. 무한 루프: 클라이언트 연결 수락 및 자식 프로세스 생성, IPC 메시지 처리
@@ -372,11 +376,16 @@ int main(int argc, char **argv)
                 syslog(LOG_INFO, "Parent broadcasting message : %s (from PID: %d)", broadcast_buffer, sender_pid);
                 for(int i = 0; i < MAX_CLIENTS; i++) {
                     if(clients[i].is_active && clients[i].child_write_pipe_fd != -1 && clients[i].pid != sender_pid) {
-                        if(errno == EPIPE) syslog(LOG_WARNING, "Parent: Broken pipe writing to child %d (PID: %d). Client might have disconnected.",
-                                                    i, clients[i].pid);
-                        else if(errno != EWOULDBLOCK){
-                            syslog(LOG_ERR, "Parent write to child pipe %d(PID %d) error: %m",
-                                    clients[i].child_write_pipe_fd, clients[i].pid);
+                        if(write(clients[i].child_write_pipe_fd, broadcast_buffer, msg_len) == -1){
+                            if(errno == EPIPE){
+                                syslog(LOG_WARNING, "Parent: Broken pipe writing to child %d (PID: %d). Client might have disconnected.",
+                                        i, clients[i].pid);
+                            } else if(errno != EWOULDBLOCK) {
+                                syslog(LOG_ERR, "Parent write to child pipe %d(PID: %d) error: %m",
+                                        clients[i].child_write_pipe_fd, clients[i].pid);
+                            } else { // 성공적으로 메시지 전송, 자식에게 SIGUSR1 시그널 전송
+                                kill(clients[i].pid, SIGUSR1);
+                            }
                         }
                     }
                 }
@@ -384,16 +393,20 @@ int main(int argc, char **argv)
         } // sigusr2_received의 끝
 
         // (B) 새로운 클라이언트 연결 수락 및 자식 프로세스 생성
-        syslog(LOG_INFO, "Parent: Waiting for new client connection (Accept())."); // 추가 터미널 연결 오류 고치기 위함
+        // (새로운 터미널이 연결되지 않는 문제에 대한 논리 해결)
+        // accept()를 논블로킹 모드로 호출
         csock = accept(ssock, (struct sockaddr *)&cliaddr, &clen);
 
         if(csock == -1){
-            // accpet()가 시그널에 의해 중단될 수 있으므로 EINTR 처리
-            if(errno == EINTR && server_running) {
-                syslog(LOG_INFO, "Parent: accept() interrupted by signal, retrying"); // 터미널 추가 연결 안되어서 추가
+            if(errno == EWOULDBLOCK || errno == EAGAIN) {
+                // 새로운 연결이 없으면 계속 루프
+                usleep(10000); // CPU 과사용 방지
                 continue; // 서버가 계속 실행중이면 다시 accept 시도
             } else if(errno == EINTR && !server_running){
-                syslog(LOG_INFO, "Accept interrupted during shutdouwn.");
+                syslog(LOG_INFO, "Parent: accept() interrupted by signal, retrying");
+                continue;
+            } else if(errno == EINTR && !server_running){
+                syslog(LOG_INFO, "Accept interrupted during shutdown");
                 break;
             }
             syslog(LOG_ERR, "accept() error: %m. errno: %d", errno); // 추가 터미널 고치려고 errno 확인
