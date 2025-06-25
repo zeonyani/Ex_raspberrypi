@@ -57,7 +57,7 @@ void handle_sigchld(int sig){
 
     // waitpid를 사용하여 종료된 자식 프로세스의 자원을 회수
     while((pid = waitpid(-1, &status, WNOHANG)) > 0 ){
-        syslog(LOG_INFO, "Child process %d terminated.", pid);
+        syslog(LOG_INFO, "Child process %d terminated.(status: %d)", pid, status);
 
         // clients 배열에서 해당 PID 정보 제거
         for(int i = 0; i < MAX_CLIENTS; i++){
@@ -384,16 +384,19 @@ int main(int argc, char **argv)
         } // sigusr2_received의 끝
 
         // (B) 새로운 클라이언트 연결 수락 및 자식 프로세스 생성
+        syslog(LOG_INFO, "Parent: Waiting for new client connection (Accept())."); // 추가 터미널 연결 오류 고치기 위함
         csock = accept(ssock, (struct sockaddr *)&cliaddr, &clen);
 
         if(csock == -1){
             // accpet()가 시그널에 의해 중단될 수 있으므로 EINTR 처리
-            if(errno == EINTR && server_running) continue; // 서버가 계속 실행중이면 다시 accept 시도
-            else if(errno == EINTR && !server_running){
+            if(errno == EINTR && server_running) {
+                syslog(LOG_INFO, "Parent: accept() interrupted by signal, retrying"); // 터미널 추가 연결 안되어서 추가
+                continue; // 서버가 계속 실행중이면 다시 accept 시도
+            } else if(errno == EINTR && !server_running){
                 syslog(LOG_INFO, "Accept interrupted during shutdouwn.");
                 break;
             }
-            syslog(LOG_ERR, "accept() error: %m");
+            syslog(LOG_ERR, "accept() error: %m. errno: %d", errno); // 추가 터미널 고치려고 errno 확인
             break; // 그 외의 치명적인 에러 시 루프 탈출
         }
         // 클라이언트 연결이 수락되면 (accept() 후, fork() 호출 전
