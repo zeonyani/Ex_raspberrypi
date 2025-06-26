@@ -142,7 +142,7 @@ void handle_client_communication(int csock, int to_parent_pipe_wfd, int from_par
                 kill(getppid(), SIGUSR2);
             }
         } else if(nbytes == 0){ // 클라이언트가 연결을 정상적으로 종료한 경우
-                syslog(LOG_ERR, "Child %d read from client error: %m", getpid());
+                syslog(LOG_INFO, "Child %d Cient disconnected normally.", getpid());
                 break; // 통신 루프 종료
         } else if(nbytes == -1 && errno != EWOULDBLOCK) { // 에러 - EWOULDBLOCK은 논블로킹일 때 데이터 없음
             syslog(LOG_ERR, "Child %d read from client error: %m", getpid());
@@ -383,9 +383,10 @@ int main(int argc, char **argv)
                             } else if(errno != EWOULDBLOCK) {
                                 syslog(LOG_ERR, "Parent write to child pipe %d(PID: %d) error: %m",
                                         clients[i].child_write_pipe_fd, clients[i].pid);
-                            } else { // 성공적으로 메시지 전송, 자식에게 SIGUSR1 시그널 전송
-                                kill(clients[i].pid, SIGUSR1);
                             }
+                        }
+                        else { // 성공적으로 메시지 전송, 자식에게 SIGUSR1 시그널 전송
+                            kill(clients[i].pid, SIGUSR1);
                         }
                     }
                 }
@@ -516,7 +517,7 @@ int main(int argc, char **argv)
             snprintf(clients[client_idx].nickname, sizeof(clients[client_idx].nickname), "user%d", client_idx); // 닉네임 초기 설정
 
             syslog(LOG_INFO, "Parent process created child %d for client %s:%d at slot %d, Pipes R:%d W:%d",
-                    pid, clients[client_idx].client_port, client_idx,
+                    pid, clients[client_idx].client_ip, clients[client_idx].client_port, client_idx,
                     clients[client_idx].parent_read_pipe_fd, clients[client_idx].child_write_pipe_fd);
         } // else문의 끝(부모프로세스 블록)
     } // while문의 끝
