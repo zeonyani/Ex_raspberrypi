@@ -17,6 +17,7 @@
 #define TCP_PORT 5100 // 서버가 사용할 포트 번호
 #define BUFSIZE 1024 // 버퍼 크기
 #define MAX_CLIENTS 10 // 최대 클라이언트 수(조절 가능)
+#define NICKNAME_MAX_LEN 31 // 닉네임 최대 길이 (널문자 포함 32)
 
 // 전역 변수 및 시그널 핸들러 선언
 typedef struct {
@@ -25,7 +26,7 @@ typedef struct {
     int child_write_pipe_fd; // 자식이 부모에게 쓸 파이프 FD (부모가 읽을 FD)
     char client_ip[INET_ADDRSTRLEN]; // 클라이언트 IP 주소
     int client_port; // 클라이언트 포트 번호 (추가 정보)
-    char nickname[32]; // 클라이언트 닉네임
+    char nickname[NICKNAME_MAX_LEN + 1]; // 클라이언트 닉네임
     int is_active; // 해당 슬롯이 활성상태인지 여부(1: 활성 0: 비활성)
 }client_info_t;
 
@@ -107,6 +108,10 @@ void handle_sigusr2(int sig){
 void handle_client_communication(int csock, int to_parent_pipe_wfd, int from_parent_pipe_rfd){
     char buffer[BUFSIZE];
     int nbytes;
+    int nickname_set = 0; // 닉네임이 설정여부 플래그
+    char client_nickname[NICKNAME_MAX_LEN + 1]; // 자식프로세스에서 사용할 클라이언트 닉네임
+
+    memset(client_nickname, 0, sizeof(client_nicname)); // 닉네임 버퍼 초기화
 
     // 파이프 FD들을 논블로킹 모드로 설정 (select/epoll 사용금지이므로 필수!)
     // O_NOONBLOCK은 fcntl.h에 정의
@@ -122,6 +127,16 @@ void handle_client_communication(int csock, int to_parent_pipe_wfd, int from_par
         if(nbytes > 0) {
             buffer[nbytes] = '\0';
             syslog(LOG_INFO, "Child %d received from client: %s", getpid(), buffer);
+            if(!nickname_set) { // 아직 닉네임 미설정시 첫 메시지를 닉네임으로 간주
+                strncpy(client_nickname, buffer, NICKNAME_MAX_LEN);
+                client_nickname[NICKNAME_MAX_LEN] = '\0';
+                syslog(LOG_INFO, "Child %d set nickname to %s.", getpid(), client_nickname);
+            }
+
+            // 닉네임 설정 완료 알림(부모에게 알려줄 필요 없음, 자식 내부 로직)
+            // 브로드캐스팅을 위해 부모가 저장하도록 메시지를 한 번 보내야 함
+            char entry_msg[BUFSIZE];
+            sprintf(entry_msg, BUFSIZE, "%s has joined the chat.", client_nickname);
             if(strcmp(buffer, "q") == 0){
                 syslog(LOG_INFO, "Child %d client sent 'q', breaking communication loop.", getpid());
                 break; // 'q'입력 시 종료

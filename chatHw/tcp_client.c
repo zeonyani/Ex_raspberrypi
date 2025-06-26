@@ -9,6 +9,7 @@
 
 #define TCP_PORT 5100
 #define BUFSIZE 1024
+#define NICKNAME_MAX_LEN 31 // 닉네임 최대 길이(널문자 포함 32바이트)
 
 int main(int argc, char **argv)
 {
@@ -16,6 +17,7 @@ int main(int argc, char **argv)
     struct sockaddr_in servaddr;
     char buffer[BUFSIZ];
     int nbytes;
+    char nickname[NICKNAME_MAX_LEN + 1]; // 닉네임 버퍼
 
     if(argc<2) {
         printf("Usage : %s IP_ADRESS\n", argv[0]);
@@ -44,6 +46,32 @@ int main(int argc, char **argv)
     }
     printf("Connect to server.\n");
 
+    // 닉네임 입력 요청 및 전송
+    printf("Enter your nickname(max: %d chars): ", NICKNAME_MAX_LEN);
+    if(fgets(nickname, NICKNAME_MAX_LEN + 1, stdin) == NULL) {
+        perror("fgets nickname");
+        close(ssock);
+        return -1;
+    }
+
+    // 개행 문자 제거
+    nickname[strcspn(nickname, "\n")] = 0;
+
+    // 닉네임이 비어있으면 기본값 설정 (에러처리)
+    if(strlen(nickname) == 0) {
+        strcpy(nickname, "Guest: ");
+        printf("Nickname can't be empty. You're 'Guest'.\n");
+    }
+
+    // 닉네임 전송
+    if(write(ssock, nickname, strlen(nickname)) == -1){
+        perror("wirte() nickname to server error");
+        close(ssock);
+        return -1;
+    }
+    printf("Nickname %s sent to sever.\n", nickname);
+    // 여기까지가 닉네임 기능
+
     // 4. 표준 입력(stdin)과 서버 소켓을 논블로킹 모드로 설정 (동시 처리를 위함)
     fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK); // 표준 입력 (파일디스크립터 0)
     fcntl(ssock, F_SETFL, O_NONBLOCK); // 서버 소켓
@@ -66,7 +94,7 @@ int main(int argc, char **argv)
                 break;
             }
 
-            // 메시지를 서버로 전송
+            // 메시지를 서버로 전송(닉네임은 서버가 붙여줌
             if(write(ssock, buffer, nbytes) == -1){
                 perror("write() to server error");
                 break;
@@ -81,7 +109,7 @@ int main(int argc, char **argv)
         nbytes = read(ssock, buffer, BUFSIZE-1);
         if(nbytes > 0) {
             buffer[nbytes] = '\0'; // 널 종료 문자 추가
-            printf("Received from server : %s\n", buffer); // 서버로부터 받은 메시지 출력
+            printf("%s\n", buffer); // 서버로부터 받은 메시지 출력
         } else if(nbytes == 0) { // 서버 연결 종료
             printf("Disconnected from server.\n");
             break;
