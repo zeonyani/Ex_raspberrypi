@@ -11,6 +11,8 @@
 #define BUFSIZE 1024
 #define NICKNAME_MAX_LEN 31 // 닉네임 최대 길이(널문자 포함 32바이트)
 
+// 업로드 되는지 확인하기 위한 줄
+
 int main(int argc, char **argv)
 {
     int ssock; // 서버와의 통신 소켓
